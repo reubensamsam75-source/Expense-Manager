@@ -6,7 +6,7 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -22,12 +22,15 @@ function getGenAI(): GoogleGenAI {
     if (!key) {
       console.warn("WARNING: GEMINI_API_KEY is not defined. AI features will fallback to client-side heuristics.");
     }
-    aiClient = new GoogleGenAI({ apiKey: key || 'MOCK_KEY' });
+    aiClient = new GoogleGenAI({
+      apiKey: key || 'MOCK_KEY',
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+    });
   }
   return aiClient;
 }
 
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 
 // API route: Parse natural language expense inputs
 app.post('/api/parse-natural-language', async (req: Request, res: Response) => {
@@ -53,7 +56,7 @@ Input Sentence: "${text}"
 You must respond ONLY with a valid, clean JSON object (no markdown, no backticks, no wrapping text, just raw json). The object must conform exactly to this schema:
 {
   "amount": number (positive amount),
-  "category": string (Must be exactly one of: "Food & Dining", "Shopping", "Housing", "Transportation", "Entertainment", "Income", "Healthcare", "Education", "Others"),
+  "category": string (Must be one of: "Food & Dining", "Shopping", "Housing", "Transportation", "Entertainment", "Healthcare", "Education", "Others", or for income: "Salary", "Freelance", "Investments", "Dividends", "Business", "Bonus & Gifts", "Refunds & Cashback", "Rental Income", "Other Income"),
   "type": "income" | "expense",
   "description": string (Capitalized clean description, e.g. "Starbucks Coffee" instead of "starbucks"),
   "date": "YYYY-MM-DD" (Calculate based on sentence like "yesterday", "last Monday", or fallback to Current Reference Date if not mentioned),
@@ -61,7 +64,7 @@ You must respond ONLY with a valid, clean JSON object (no markdown, no backticks
   "isRecurring": boolean (true if recurring, monthly, subscription, membership, or rent mentioned, false otherwise)
 }
 
-If details like paymentMethod are not mentioned, default to "Cash" for small purchases (< $30) or "Debit Card" otherwise. If the input is clearly income (e.g. salary, got paid, bonus, dividend, gig work), set "type" to "income" and "category" to "Income". If amount is not specified, make a reasonable estimation or default to 10.0. Ensure the output is valid JSON.`;
+If details like paymentMethod are not mentioned, default to "Cash" for small purchases (< $30) or "Debit Card" otherwise. If the input is clearly income (e.g. salary, got paid, bonus, dividend, gig work, refund, rent received), set "type" to "income" and choose the matching income category (e.g. "Salary", "Freelance", "Dividends", "Investments", "Bonus & Gifts", "Refunds & Cashback", "Rental Income", or "Other Income"). If amount is not specified, make a reasonable estimation or default to 10.0. Ensure the output is valid JSON.`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -320,7 +323,7 @@ ${rawText}
 Respond ONLY with a valid JSON array (no markdown fences, no commentary). Each element must follow this exact schema:
 {
   "amount": number (positive number),
-  "category": string ("Food & Dining" | "Shopping" | "Housing" | "Transportation" | "Entertainment" | "Income" | "Healthcare" | "Education" | "Others"),
+  "category": string ("Food & Dining" | "Shopping" | "Housing" | "Transportation" | "Entertainment" | "Healthcare" | "Education" | "Others" | "Salary" | "Freelance" | "Investments" | "Dividends" | "Business" | "Bonus & Gifts" | "Refunds & Cashback" | "Rental Income" | "Other Income"),
   "type": "income" | "expense",
   "description": string (clean merchant or purchase title, e.g. "Swiggy Dinner Order", "Amazon Electronics"),
   "date": "YYYY-MM-DD",
@@ -386,6 +389,162 @@ Respond ONLY with a valid JSON array (no markdown fences, no commentary). Each e
   }
 });
 
+// Multimodal Receipt Image / Camera Scanner via Gemini
+app.post('/api/scan-receipt', async (req: Request, res: Response) => {
+  try {
+    const {
+      imageBase64,
+      mimeType = 'image/jpeg',
+      connectedApps = [],
+      currentDate,
+      requireExplicitAppPermission = true,
+    } = req.body || {};
+
+    if (!imageBase64 || typeof imageBase64 !== 'string') {
+      return res.status(400).json({ error: 'Receipt image data is required.' });
+    }
+
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) {
+      return res.status(503).json({
+        error: 'GEMINI_API_KEY is not configured in environment secrets. Please set it to enable AI receipt image scanning.'
+      });
+    }
+
+    // Strip optional data URL prefix (e.g., data:image/jpeg;base64,...)
+    const dataUrlMatch = imageBase64.match(/^data:([^;]+);base64,(.+)$/);
+    const resolvedMimeType = dataUrlMatch ? dataUrlMatch[1] : mimeType;
+    const cleanBase64 = (dataUrlMatch ? dataUrlMatch[2] : imageBase64).replace(/\s/g, '');
+
+    if (!cleanBase64 || cleanBase64.length < 32) {
+      return res.status(400).json({ error: 'Invalid or empty receipt image payload.' });
+    }
+
+    const refDate = currentDate || new Date().toISOString().split('T')[0];
+    const appNamesList = Array.isArray(connectedApps)
+      ? connectedApps.map((a: any) => `${a.name} (${a.category})`).join(', ')
+      : '';
+
+    const ai = getGenAI();
+    const prompt = `You are a high-precision financial receipt, invoice, and payment screenshot OCR + structured extraction engine.
+Inspect the attached image (which may be a printed store/restaurant receipt, an itemized invoice, a UPI/payment app confirmation screenshot, or a food/shopping order screenshot).
+
+Reference Date (use only if the receipt has no visible date): ${refDate}
+Known Connected Apps: ${appNamesList || 'Google Pay (GPay), PhonePe, Paytm, Swiggy, Zomato, Amazon, Flipkart, Uber Rides'}
+
+Instructions:
+1. Extract the final total paid/received transaction (or multiple distinct transactions if the screenshot shows a list of transactions; for a single store receipt, return 1 primary transaction representing the grand total paid, including tax/tip, with a concise summary description like "Starbucks Coffee & Pastry" or "Walmart Groceries").
+2. Detect the merchant or app name (e.g. "Swiggy", "Google Pay (GPay)", "Amazon", "Target", etc.).
+3. Detect if this is an "expense" or "income" (e.g. refund, cashback, payout, salary slip = "income"; purchase, bill, order = "expense").
+4. Choose the best matching category:
+   - Expense categories: "Food & Dining", "Shopping", "Housing", "Transportation", "Entertainment", "Healthcare", "Education", "Others"
+   - Income categories: "Salary", "Freelance", "Investments", "Dividends", "Business", "Bonus & Gifts", "Refunds & Cashback", "Rental Income", "Other Income"
+5. Detect paymentMethod from the receipt ("UPI", "Credit Card", "Debit Card", "Bank Transfer", or "Cash"). Default to "UPI" if a UPI/QR/GPay/PhonePe/Paytm confirmation is visible, "Credit Card" for card slips, or "Cash" otherwise.
+6. Format date strictly as "YYYY-MM-DD".`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: resolvedMimeType,
+              data: cleanBase64,
+            },
+          },
+          { text: prompt },
+        ],
+      },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            receiptSummary: {
+              type: Type.STRING,
+              description: 'Brief 1-sentence summary of the scanned receipt or screenshot.',
+            },
+            transactions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  amount: { type: Type.NUMBER },
+                  category: { type: Type.STRING },
+                  type: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  date: { type: Type.STRING },
+                  paymentMethod: { type: Type.STRING },
+                  sourceApp: { type: Type.STRING },
+                  sourceAppType: { type: Type.STRING },
+                  rawSnippet: { type: Type.STRING },
+                },
+                required: ['amount', 'category', 'type', 'description', 'date', 'paymentMethod', 'sourceApp'],
+              },
+            },
+          },
+          required: ['receiptSummary', 'transactions'],
+        },
+      },
+    });
+
+    const rawOutput = (response.text || '').trim();
+    if (!rawOutput) {
+      return res.status(422).json({ error: 'Could not extract readable receipt details from this image.' });
+    }
+
+    const parsedPayload = JSON.parse(rawOutput);
+    const items: any[] = Array.isArray(parsedPayload.transactions) ? parsedPayload.transactions : [];
+
+    const enriched = items
+      .filter((item) => typeof item.amount === 'number' && item.amount > 0)
+      .map((item, idx) => {
+        const snippet = item.rawSnippet || `${item.sourceApp || ''} ${item.description || ''}`.trim();
+        const matched = matchConnectedApp(snippet, item.sourceApp, connectedApps);
+
+        const resolvedName = matched ? matched.name : item.sourceApp || 'Receipt Scan';
+        const validTypes = ['upi', 'food', 'shopping', 'other'];
+        const resolvedType = matched
+          ? matched.category
+          : validTypes.includes(item.sourceAppType)
+            ? item.sourceAppType
+            : 'other';
+        const isPermitted = matched
+          ? Boolean(matched.permissionEnabled)
+          : !requireExplicitAppPermission;
+
+        return {
+          tempId: `scan-${Date.now()}-${idx}`,
+          amount: Number(item.amount),
+          category: item.category || (matched ? matched.defaultLedgerCategory : 'Others'),
+          type: item.type === 'income' ? ('income' as const) : ('expense' as const),
+          description: item.description || `${resolvedName} Receipt`,
+          date: /^\d{4}-\d{2}-\d{2}$/.test(item.date || '') ? item.date : refDate,
+          paymentMethod: item.paymentMethod || (matched ? matched.defaultPaymentMethod : 'Cash'),
+          sourceApp: resolvedName,
+          sourceAppId: matched?.id,
+          sourceAppType: resolvedType,
+          permissionStatus: isPermitted ? ('granted' as const) : ('blocked' as const),
+          rawSnippet: snippet.slice(0, 140),
+        };
+      });
+
+    if (enriched.length === 0) {
+      return res.status(422).json({
+        error: 'No valid transaction totals were detected in the image. Try a clearer photo with visible amounts.'
+      });
+    }
+
+    res.json({
+      receiptSummary: parsedPayload.receiptSummary || `Extracted ${enriched.length} transaction(s) from receipt`,
+      transactions: enriched,
+    });
+  } catch (error: any) {
+    console.error('Error scanning receipt image via Gemini:', error);
+    res.status(500).json({ error: 'Failed to scan receipt image', details: error.message });
+  }
+});
+
 function parseAppAlertsHeuristic(rawText: string, connectedApps: any[], refDate: string): any[] {
   const lines = rawText
     .split(/\r?\n+/)
@@ -424,7 +583,9 @@ function parseAppAlertsHeuristic(rawText: string, connectedApps: any[], refDate:
       paymentMethod = 'Bank Transfer';
     }
 
-    let category = isIncome ? 'Income' : matched?.defaultLedgerCategory || 'Others';
+    let category = isIncome
+      ? (lower.includes('cashback') || lower.includes('refund') ? 'Refunds & Cashback' : 'Other Income')
+      : matched?.defaultLedgerCategory || 'Others';
     if (!isIncome && !matched) {
       if (lower.includes('food') || lower.includes('swiggy') || lower.includes('zomato') || lower.includes('order') || lower.includes('dinner') || lower.includes('lunch') || lower.includes('coffee')) {
         category = 'Food & Dining';
@@ -494,8 +655,26 @@ function mockParseHeuristic(text: string, refDate: string): any {
   let category = 'Others';
   let type: 'income' | 'expense' = 'expense';
   
-  if (words.includes('salary') || words.includes('paycheck') || words.includes('gig') || words.includes('earned') || words.includes('dividend') || words.includes('bonus')) {
-    category = 'Income';
+  if (words.includes('salary') || words.includes('paycheck')) {
+    category = 'Salary';
+    type = 'income';
+  } else if (words.includes('freelance') || words.includes('gig') || words.includes('consulting')) {
+    category = 'Freelance';
+    type = 'income';
+  } else if (words.includes('dividend')) {
+    category = 'Dividends';
+    type = 'income';
+  } else if (words.includes('invest') || words.includes('stock') || words.includes('crypto')) {
+    category = 'Investments';
+    type = 'income';
+  } else if (words.includes('bonus') || words.includes('gift')) {
+    category = 'Bonus & Gifts';
+    type = 'income';
+  } else if (words.includes('refund') || words.includes('cashback')) {
+    category = 'Refunds & Cashback';
+    type = 'income';
+  } else if (words.includes('earned')) {
+    category = 'Other Income';
     type = 'income';
   } else if (words.includes('food') || words.includes('eat') || words.includes('lunch') || words.includes('dinner') || words.includes('breakfast') || words.includes('sushi') || words.includes('starbucks') || words.includes('coffee') || words.includes('restaurant') || words.includes('burger')) {
     category = 'Food & Dining';

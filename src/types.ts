@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export type TimeframePeriod = 'daily' | 'weekly' | 'monthly' | 'yearly';
+
+export type AppThemeId = 'light' | 'warm' | 'dark' | 'ocean' | 'forest' | 'violet';
+
 export type AppCategory = 'upi' | 'food' | 'shopping' | 'other';
 
 export interface ConnectedApp {
@@ -43,6 +47,8 @@ export interface CollectedAppTransaction {
   sourceAppType: AppCategory;
   permissionStatus: 'granted' | 'blocked';
   rawSnippet?: string;
+  collectedAt?: string;
+  importedToLedger?: boolean;
 }
 
 export interface PendingWebhookAlert {
@@ -63,6 +69,7 @@ export interface Transaction {
   type: 'income' | 'expense';
   paymentMethod: string;
   isRecurring?: boolean;
+  recurringFrequency?: TimeframePeriod;
   originalTransactionId?: string;
   sourceApp?: string;
   sourceAppType?: AppCategory;
@@ -103,6 +110,7 @@ export interface ParsedTransaction {
   date: string; // YYYY-MM-DD
   paymentMethod: string;
   isRecurring?: boolean;
+  recurringFrequency?: TimeframePeriod;
 }
 
 export interface FinancialInsights {

@@ -4,22 +4,32 @@
  */
 
 import React, { useMemo } from 'react';
-import { Transaction, Currency } from '../types';
+import { Transaction, Currency, TimeframePeriod } from '../types';
 import { CATEGORY_STYLES } from '../utils/mockData';
 import { formatAmount } from '../utils/currency';
+import { isDateInTimeframe, getTimeframeLabel } from '../utils/dateUtils';
 
 interface FinanceChartsProps {
   transactions: Transaction[];
   activeCurrency: Currency;
+  timeframe?: TimeframePeriod;
 }
 
-export const FinanceCharts: React.FC<FinanceChartsProps> = ({ transactions, activeCurrency }) => {
-  const currentMonthStr = new Date().toISOString().slice(0, 7); // "YYYY-MM"
+export const FinanceCharts: React.FC<FinanceChartsProps> = ({
+  transactions,
+  activeCurrency,
+  timeframe: rawTimeframe
+}) => {
+  const timeframe: TimeframePeriod = rawTimeframe ?? 'monthly';
+  const now = useMemo(() => new Date(), []);
+  const periodLabel = getTimeframeLabel(timeframe);
 
-  // Filter current month expenses
+  // Filter expenses for the active timeframe
   const expenses = useMemo(() => {
-    return transactions.filter(t => t.type === 'expense' && t.date.startsWith(currentMonthStr));
-  }, [transactions, currentMonthStr]);
+    return transactions.filter(
+      (t) => t.type === 'expense' && isDateInTimeframe(t.date, timeframe, now)
+    );
+  }, [transactions, timeframe, now]);
 
   const totalExpense = useMemo(() => {
     return expenses.reduce((sum, t) => sum + t.amount, 0);
@@ -41,9 +51,63 @@ export const FinanceCharts: React.FC<FinanceChartsProps> = ({ transactions, acti
     return list.sort((a, b) => b.amount - a.amount);
   }, [expenses, totalExpense]);
 
-  // Aggregate weekly spending
-  const weeklyData = useMemo(() => {
-    const weeks = [0, 0, 0, 0]; // W1 (1-7), W2 (8-14), W3 (15-21), W4 (22+)
+  // Dynamic breakdown bars based on daily / weekly / monthly / yearly
+  const breakdownBars = useMemo(() => {
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const toIso = (d: Date) =>
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+    if (timeframe === 'daily') {
+      // Show 5-day trajectory ending Today so daily comparison is visible
+      const buckets: Array<{ label: string; value: number }> = [];
+      for (let offset = 4; offset >= 0; offset--) {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset);
+        const iso = toIso(d);
+        const sum = transactions
+          .filter((t) => t.type === 'expense' && t.date === iso)
+          .reduce((acc, t) => acc + t.amount, 0);
+        const label =
+          offset === 0
+            ? 'Today'
+            : offset === 1
+              ? 'Yest'
+              : d.toLocaleDateString(undefined, { weekday: 'short' });
+        buckets.push({ label, value: sum });
+      }
+      return buckets;
+    }
+
+    if (timeframe === 'weekly') {
+      // Show 7 daily bars for the last 7 days
+      const buckets: Array<{ label: string; value: number }> = [];
+      for (let offset = 6; offset >= 0; offset--) {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset);
+        const iso = toIso(d);
+        const sum = expenses
+          .filter((t) => t.date === iso)
+          .reduce((acc, t) => acc + t.amount, 0);
+        buckets.push({
+          label: d.toLocaleDateString(undefined, { weekday: 'short' }).slice(0, 3),
+          value: sum
+        });
+      }
+      return buckets;
+    }
+
+    if (timeframe === 'yearly') {
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const totals = new Array(12).fill(0);
+      expenses.forEach((e) => {
+        const monthIdx = parseInt(e.date.split('-')[1] || '1', 10) - 1;
+        if (monthIdx >= 0 && monthIdx < 12) {
+          totals[monthIdx] += e.amount;
+        }
+      });
+      return months.map((m, idx) => ({ label: m, value: totals[idx] }));
+    }
+
+    // Default: monthly (Week 1..4)
+    const weeks = [0, 0, 0, 0];
     expenses.forEach((e) => {
       const day = parseInt(e.date.split('-')[2] || '1', 10);
       if (day <= 7) weeks[0] += e.amount;
@@ -51,13 +115,13 @@ export const FinanceCharts: React.FC<FinanceChartsProps> = ({ transactions, acti
       else if (day <= 21) weeks[2] += e.amount;
       else weeks[3] += e.amount;
     });
-    return weeks;
-  }, [expenses]);
+    return weeks.map((val, i) => ({ label: `Wk ${i + 1}`, value: val }));
+  }, [timeframe, expenses, transactions, now]);
 
-  const maxWeekly = useMemo(() => {
-    const max = Math.max(...weeklyData);
+  const maxBarValue = useMemo(() => {
+    const max = Math.max(...breakdownBars.map((b) => b.value), 0);
     return max > 0 ? max : 100;
-  }, [weeklyData]);
+  }, [breakdownBars]);
 
   // Donut chart path rendering parameters
   const donutRadius = 50;
@@ -71,34 +135,42 @@ export const FinanceCharts: React.FC<FinanceChartsProps> = ({ transactions, acti
       const startAngle = accumulatedAngle;
       accumulatedAngle += angle;
 
-      // Calculate path coordinates for SVG stroke-dasharray approach
       const circumference = 2 * Math.PI * donutRadius;
       const strokeDashoffset = circumference - (item.percentage / 100) * circumference;
       const strokeDasharray = `${circumference} ${circumference}`;
-      
-      // Calculate start and end coordinates for tooltip placements if needed
+
       return {
         ...item,
         strokeDasharray,
         strokeDashoffset,
-        rotation: startAngle - 90 // Start at top
+        rotation: startAngle - 90
       };
     });
   }, [categoryData]);
 
+  const barTitleMap: Record<TimeframePeriod, string> = {
+    daily: 'Daily Outflow Trend (5 Days)',
+    weekly: 'Daily Expenditures (7 Days)',
+    monthly: 'Weekly Expenditures (This Month)',
+    yearly: 'Monthly Expenditures (This Year)'
+  };
+
   return (
     <div id="financial-charts-container" className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-6 shadow-sm grid grid-cols-1 md:grid-cols-2 gap-8">
-      
       {/* 1. Category Share Donut */}
       <div className="space-y-4">
         <div>
-          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Category Expense Share</h3>
-          <p className="text-[10px] text-slate-400">Total spent this month: {formatAmount(totalExpense, activeCurrency)}</p>
+          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+            Category Expense Share ({periodLabel})
+          </h3>
+          <p className="text-[11px] text-slate-400">
+            Total spent ({periodLabel.toLowerCase()}): {formatAmount(totalExpense, activeCurrency)}
+          </p>
         </div>
 
         {totalExpense === 0 ? (
           <div className="h-44 flex flex-col items-center justify-center text-xs text-slate-400 border border-dashed border-slate-100 dark:border-slate-800 rounded-xl">
-            No expenses logged for this month
+            No expenses logged for {periodLabel.toLowerCase()}
           </div>
         ) : (
           <div className="flex items-center gap-4">
@@ -142,14 +214,14 @@ export const FinanceCharts: React.FC<FinanceChartsProps> = ({ transactions, acti
                   );
                 })}
               </svg>
-              {/* Inner Center Text */}
               <div className="absolute inset-0 flex flex-col items-center justify-center">
                 <span className="text-[10px] text-slate-400 uppercase font-semibold">Spent</span>
-                <span className="text-sm font-bold text-slate-800 dark:text-white">{formatAmount(totalExpense, activeCurrency)}</span>
+                <span className="text-sm font-bold text-slate-800 dark:text-white font-mono tabular-nums">
+                  {formatAmount(totalExpense, activeCurrency)}
+                </span>
               </div>
             </div>
 
-            {/* Legends List */}
             <div className="flex-1 space-y-2 max-h-36 overflow-y-auto pr-1">
               {categoryData.slice(0, 4).map((item, i) => {
                 const style = CATEGORY_STYLES[item.category] || CATEGORY_STYLES['Others'];
@@ -159,7 +231,7 @@ export const FinanceCharts: React.FC<FinanceChartsProps> = ({ transactions, acti
                       <span className={`w-2 h-2 rounded-full ${style.bg} border ${style.border}`} />
                       <span className="text-slate-600 dark:text-slate-300 truncate font-medium">{item.category}</span>
                     </div>
-                    <span className="text-slate-800 dark:text-slate-100 font-semibold font-mono">
+                    <span className="text-slate-800 dark:text-slate-100 font-semibold font-mono tabular-nums">
                       {Math.round(item.percentage)}%
                     </span>
                   </div>
@@ -170,37 +242,42 @@ export const FinanceCharts: React.FC<FinanceChartsProps> = ({ transactions, acti
         )}
       </div>
 
-      {/* 2. Weekly Spending Bar Chart */}
+      {/* 2. Period Expenditures Bar Chart */}
       <div className="space-y-4">
         <div>
-          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Weekly Expenditures</h3>
-          <p className="text-[10px] text-slate-400">Weekly breakdown of cash outflows</p>
+          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+            {barTitleMap[timeframe]}
+          </h3>
+          <p className="text-[11px] text-slate-400">
+            Cash outflow breakdown by {timeframe === 'yearly' ? 'month' : timeframe === 'monthly' ? 'week' : 'day'}
+          </p>
         </div>
 
-        {totalExpense === 0 ? (
+        {breakdownBars.every((b) => b.value === 0) ? (
           <div className="h-44 flex flex-col items-center justify-center text-xs text-slate-400 border border-dashed border-slate-100 dark:border-slate-800 rounded-xl">
-            No expenses logged for this month
+            No expenses logged for {periodLabel.toLowerCase()}
           </div>
         ) : (
-          <div className="flex h-32 items-end justify-between px-2 pt-4">
-            {weeklyData.map((val, i) => {
-              const hPercent = (val / maxWeekly) * 100;
+          <div className="flex h-36 items-end justify-between gap-1 px-1 pt-4">
+            {breakdownBars.map((bar, i) => {
+              const hPercent = bar.value > 0 ? Math.max((bar.value / maxBarValue) * 100, 6) : 3;
               return (
-                <div key={i} className="flex flex-col items-center flex-1 group">
-                  {/* Tooltip on hover */}
-                  <div className="opacity-0 group-hover:opacity-100 transition-opacity bg-slate-950 dark:bg-slate-800 text-white rounded-md text-[10px] px-1.5 py-0.5 mb-1.5 shadow-md z-10 font-mono">
-                    {formatAmount(val, activeCurrency)}
+                <div key={i} className="flex flex-col items-center flex-1 min-w-0 group">
+                  <div className="opacity-0 group-hover:opacity-100 transition-opacity bg-slate-950 dark:bg-slate-800 text-white rounded-md text-[10px] px-1.5 py-0.5 mb-1.5 shadow-md z-10 font-mono whitespace-nowrap">
+                    {formatAmount(bar.value, activeCurrency)}
                   </div>
-                  {/* Bar shape */}
-                  <div className="w-8 bg-slate-100 dark:bg-slate-800 rounded-md h-24 flex items-end overflow-hidden">
+                  <div className={`bg-slate-100 dark:bg-slate-800 rounded-md h-24 flex items-end overflow-hidden ${timeframe === 'yearly' ? 'w-3.5 sm:w-5' : 'w-6 sm:w-8'}`}>
                     <div
-                      style={{ height: `${Math.max(hPercent, 5)}%` }}
-                      className="w-full bg-indigo-500 group-hover:bg-indigo-600 transition-all rounded-md"
+                      style={{ height: `${hPercent}%` }}
+                      className={`w-full rounded-md transition-all ${
+                        bar.value > 0
+                          ? 'bg-indigo-500 group-hover:bg-indigo-600'
+                          : 'bg-slate-200 dark:bg-slate-700/50'
+                      }`}
                     />
                   </div>
-                  {/* Label */}
-                  <span className="text-[10px] text-slate-400 font-mono mt-1.5 font-semibold">
-                    Week {i + 1}
+                  <span className="text-[10px] text-slate-400 font-mono mt-1.5 font-semibold truncate max-w-full">
+                    {bar.label}
                   </span>
                 </div>
               );
@@ -208,7 +285,6 @@ export const FinanceCharts: React.FC<FinanceChartsProps> = ({ transactions, acti
           </div>
         )}
       </div>
-
     </div>
   );
 };

@@ -14,11 +14,19 @@
       (function () {
         try {
           var saved = localStorage.getItem('decu_theme');
-          var theme = saved === 'dark' || saved === 'light'
+          var valid = ['light', 'warm', 'dark', 'ocean', 'forest', 'violet'];
+          var theme = valid.indexOf(saved) !== -1
             ? saved
             : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-          if (theme === 'dark') document.documentElement.classList.add('dark');
-          document.documentElement.style.colorScheme = theme;
+          var darkThemes = ['dark', 'ocean', 'forest', 'violet'];
+          var isDark = darkThemes.indexOf(theme) !== -1;
+          document.documentElement.setAttribute('data-theme', theme);
+          if (isDark) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+          document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
         } catch (e) {}
       })();
     </script>

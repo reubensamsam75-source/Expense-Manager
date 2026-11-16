@@ -4,6 +4,8 @@
  */
 
 import React, { useState } from 'react';
+import { AppThemeId } from '../types';
+import { THEME_OPTIONS, getThemeOption } from '../utils/themes';
 import { LucideIcon } from './LucideIcon';
 
 export type SidebarMenuId =
@@ -31,8 +33,8 @@ interface SidebarSection {
 interface LeftSidebarProps {
   activeMenu: SidebarMenuId;
   onSelectMenu: (menu: SidebarMenuId) => void;
-  activeTheme: 'light' | 'dark';
-  onSetTheme: (theme: 'light' | 'dark') => void;
+  activeTheme: AppThemeId;
+  onSetTheme: (theme: AppThemeId) => void;
   permittedAppsCount: number;
   pendingWebhooksCount: number;
   recurringCount: number;
@@ -64,12 +66,20 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
     }));
   };
 
+  const cycleTheme = () => {
+    const idx = THEME_OPTIONS.findIndex((t) => t.id === activeTheme);
+    const next = THEME_OPTIONS[(idx + 1) % THEME_OPTIONS.length];
+    onSetTheme(next.id);
+  };
+
+  const currentThemeMeta = getThemeOption(activeTheme);
+
   const sections: SidebarSection[] = [
     {
       title: 'Workspace',
       items: [
         { id: 'overview', label: 'Overview', icon: 'LayoutDashboard' },
-        { id: 'transactions', label: 'Transactions', icon: 'Coins' },
+        { id: 'transactions', label: 'Logs & Ledger', icon: 'Coins' },
         {
           id: 'calendar',
           label: 'Calendar',
@@ -247,66 +257,71 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
         </nav>
       </div>
 
-      {/* Bottom Appearance / Dark Mode Controls */}
+      {/* Bottom Appearance / Multi-Theme Selector */}
       <div
         className={`border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 ${
-          collapsed ? 'p-2.5 flex justify-center' : 'p-4 space-y-3'
+          collapsed ? 'p-2.5 flex justify-center' : 'p-4 space-y-2.5'
         }`}
       >
         {collapsed ? (
           <button
             id="sidebar-theme-collapsed-toggle"
             type="button"
-            onClick={() => onSetTheme(activeTheme === 'light' ? 'dark' : 'light')}
-            title={`Switch to ${activeTheme === 'light' ? 'Dark' : 'Light'} mode`}
-            aria-label={`Switch to ${activeTheme === 'light' ? 'Dark' : 'Light'} mode`}
-            className="w-10 h-10 rounded-xl bg-slate-200/70 dark:bg-slate-800 hover:bg-slate-300/70 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 flex items-center justify-center transition-colors"
+            onClick={cycleTheme}
+            title={`Theme: ${currentThemeMeta.name} (Click to switch)`}
+            aria-label={`Current theme ${currentThemeMeta.name}. Click to cycle theme`}
+            className="w-10 h-10 rounded-xl bg-slate-200/70 dark:bg-slate-800 hover:bg-slate-300/70 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 flex items-center justify-center transition-colors relative"
           >
-            <LucideIcon name={activeTheme === 'light' ? 'Moon' : 'Sun'} size={16} />
+            <LucideIcon name="Palette" size={16} />
+            <span
+              className="absolute bottom-1 right-1 w-2.5 h-2.5 rounded-full border border-white dark:border-slate-900"
+              style={{ backgroundColor: currentThemeMeta.accentHex }}
+            />
           </button>
         ) : (
           <>
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Appearance
+              <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                <LucideIcon name="Palette" size={13} className="text-indigo-500" />
+                <span>Theme</span>
               </span>
-              <span className="text-[11px] text-slate-500 dark:text-slate-400 capitalize">
-                {activeTheme} mode
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                {currentThemeMeta.name}
               </span>
             </div>
 
             <div
-              role="group"
-              aria-label="Theme mode selector"
-              className="grid grid-cols-2 gap-1 p-1 bg-slate-200/70 dark:bg-slate-800 rounded-xl"
+              role="radiogroup"
+              aria-label="Theme options"
+              className="grid grid-cols-3 gap-1.5"
             >
-              <button
-                id="sidebar-theme-light"
-                type="button"
-                onClick={() => onSetTheme('light')}
-                className={`py-1.5 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                  activeTheme === 'light'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                }`}
-              >
-                <LucideIcon name="Sun" size={13} />
-                <span>Light</span>
-              </button>
-
-              <button
-                id="sidebar-theme-dark"
-                type="button"
-                onClick={() => onSetTheme('dark')}
-                className={`py-1.5 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                  activeTheme === 'dark'
-                    ? 'bg-slate-900 text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                }`}
-              >
-                <LucideIcon name="Moon" size={13} />
-                <span>Dark</span>
-              </button>
+              {THEME_OPTIONS.map((themeOpt) => {
+                const isSelected = activeTheme === themeOpt.id;
+                return (
+                  <button
+                    key={themeOpt.id}
+                    id={`sidebar-theme-${themeOpt.id}`}
+                    type="button"
+                    role="radio"
+                    aria-checked={isSelected}
+                    onClick={() => onSetTheme(themeOpt.id)}
+                    title={themeOpt.name}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-all border whitespace-nowrap ${
+                      isSelected
+                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white border-indigo-500 ring-1 ring-indigo-500/40 shadow-2xs'
+                        : 'bg-slate-100/80 dark:bg-slate-800/50 text-slate-600 dark:text-slate-400 border-transparent hover:border-slate-300 dark:hover:border-slate-700 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    <span
+                      className="w-2.5 h-2.5 rounded-full shrink-0 border border-black/15 dark:border-white/20"
+                      style={{
+                        background: `linear-gradient(135deg, ${themeOpt.surfaceHex} 50%, ${themeOpt.accentHex} 50%)`
+                      }}
+                    />
+                    <span className="truncate">{themeOpt.shortName}</span>
+                  </button>
+                );
+              })}
             </div>
           </>
         )}

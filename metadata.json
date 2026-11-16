@@ -1,6 +1,6 @@
 {
   "name": "Decuples Wealth & Asset Manager",
   "description": "An elegant, secure, full-stack asset, currency and expense manager to track, categorize, and analyze your finances with AI insights and market opportunities.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

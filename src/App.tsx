@@ -6,6 +6,9 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   AppCategory,
+  AppThemeId,
+  CollectedAppTransaction,
+  TimeframePeriod,
   Transaction,
   Budget,
   Goal,
@@ -17,7 +20,11 @@ import {
 } from './types';
 import { INITIAL_TRANSACTIONS, INITIAL_BUDGETS, INITIAL_GOALS } from './utils/mockData';
 import { DEFAULT_CONNECTED_APPS, DEFAULT_GLOBAL_PERMISSIONS } from './utils/connectedApps';
+import { isDarkTheme, normalizeThemeId } from './utils/themes';
+import { isDateInTimeframe, getTimeframeLabel } from './utils/dateUtils';
 import { LucideIcon } from './components/LucideIcon';
+import { ThemeSwitcher } from './components/ThemeSwitcher';
+import { CurrencySwitcher } from './components/CurrencySwitcher';
 import { TransactionLogger } from './components/TransactionLogger';
 import { BudgetSection } from './components/BudgetSection';
 import { TransactionList } from './components/TransactionList';
@@ -35,6 +42,13 @@ import { CURRENCY_LIST, formatAmount } from './utils/currency';
 
 export default function App() {
   const [activeMenu, setActiveMenu] = useState<SidebarMenuId>('overview');
+  const [activePeriod, setActivePeriod] = useState<TimeframePeriod>(() => {
+    const saved = localStorage.getItem('decu_timeframe');
+    if (saved === 'daily' || saved === 'weekly' || saved === 'monthly' || saved === 'yearly') {
+      return saved;
+    }
+    return 'monthly';
+  });
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     return localStorage.getItem('decu_sidebar_collapsed') === 'true';
   });
@@ -96,11 +110,27 @@ export default function App() {
     return DEFAULT_GLOBAL_PERMISSIONS;
   });
 
-  const [pendingWebhooks, setPendingWebhooks] = useState<PendingWebhookAlert[]>([]);
+  const [pendingWebhooks, setPendingWebhooks] = useState<PendingWebhookAlert[]>(() => {
+    try {
+      const saved = localStorage.getItem('decu_pending_webhooks');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
-  const [activeTheme, setActiveTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('decu_theme');
-    if (saved === 'dark' || saved === 'light') return saved;
+  const [collectedRecords, setCollectedRecords] = useState<CollectedAppTransaction[]>(() => {
+    try {
+      const saved = localStorage.getItem('decu_collected_data');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [activeTheme, setActiveTheme] = useState<AppThemeId>(() => {
+    const saved = normalizeThemeId(localStorage.getItem('decu_theme'));
+    if (saved) return saved;
     if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
       return 'dark';
     }
@@ -136,15 +166,33 @@ export default function App() {
     localStorage.setItem('decu_collection_permissions', JSON.stringify(globalPermissions));
   }, [globalPermissions]);
 
+  useEffect(() => {
+    localStorage.setItem('decu_collected_data', JSON.stringify(collectedRecords));
+  }, [collectedRecords]);
+
+  useEffect(() => {
+    localStorage.setItem('decu_pending_webhooks', JSON.stringify(pendingWebhooks));
+  }, [pendingWebhooks]);
+
+  useEffect(() => {
+    localStorage.setItem('decu_timeframe', activePeriod);
+  }, [activePeriod]);
+
   const refreshPendingWebhooks = useCallback(async () => {
     try {
       const res = await fetch('/api/app-payments/pending');
       if (res.ok) {
         const data = await res.json();
-        setPendingWebhooks(data.alerts || []);
+        const serverAlerts: PendingWebhookAlert[] = data.alerts || [];
+        if (serverAlerts.length > 0) {
+          setPendingWebhooks((prev) => {
+            const seen = new Set(serverAlerts.map((a) => a.id));
+            return [...serverAlerts, ...prev.filter((p) => !seen.has(p.id))].slice(0, 100);
+          });
+        }
       }
     } catch {
-      // Ignore network errors silently during background check
+      // Ignore network errors silently; localStorage cache remains intact
     }
   }, []);
 
@@ -155,33 +203,33 @@ export default function App() {
   // Apply and persist visual theme to the document element
   useEffect(() => {
     localStorage.setItem('decu_theme', activeTheme);
-    if (activeTheme === 'dark') {
+    const dark = isDarkTheme(activeTheme);
+    document.documentElement.setAttribute('data-theme', activeTheme);
+    if (dark) {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
     }
-    document.documentElement.style.colorScheme = activeTheme;
+    document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
   }, [activeTheme]);
 
   useEffect(() => {
     localStorage.setItem('decu_sidebar_collapsed', String(isSidebarCollapsed));
   }, [isSidebarCollapsed]);
 
-  // --- Financial Calculations ---
-  const currentMonthStr = new Date().toISOString().slice(0, 7); // "YYYY-MM"
-
-  // Aggregate stats
+  // --- Financial Calculations (Daily / Weekly / Monthly / Yearly) ---
   const stats = useMemo(() => {
-    const currentMonthExpenses = transactions
-      .filter(t => t.type === 'expense' && t.date.startsWith(currentMonthStr))
+    const now = new Date();
+    const periodExpenses = transactions
+      .filter((t) => t.type === 'expense' && isDateInTimeframe(t.date, activePeriod, now))
       .reduce((sum, t) => sum + t.amount, 0);
 
-    const currentMonthIncomes = transactions
-      .filter(t => t.type === 'income' && t.date.startsWith(currentMonthStr))
+    const periodIncomes = transactions
+      .filter((t) => t.type === 'income' && isDateInTimeframe(t.date, activePeriod, now))
       .reduce((sum, t) => sum + t.amount, 0);
 
-    const netSavings = currentMonthIncomes - currentMonthExpenses;
-    const savingsRate = currentMonthIncomes > 0 ? (netSavings / currentMonthIncomes) * 100 : 0;
+    const netSavings = periodIncomes - periodExpenses;
+    const savingsRate = periodIncomes > 0 ? (netSavings / periodIncomes) * 100 : 0;
 
     // Overall historical balance
     const totalExpensesHistory = transactions.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
@@ -189,13 +237,13 @@ export default function App() {
     const overallBalance = totalIncomesHistory - totalExpensesHistory;
 
     return {
-      currentMonthExpenses,
-      currentMonthIncomes,
+      periodExpenses,
+      periodIncomes,
       netSavings,
       savingsRate,
       overallBalance
     };
-  }, [transactions, currentMonthStr]);
+  }, [transactions, activePeriod]);
 
   // --- Core State Mutators ---
   const handleAddTransaction = (newTx: Omit<Transaction, 'id'>, nextMonthTx?: Omit<Transaction, 'id'>) => {
@@ -341,16 +389,40 @@ export default function App() {
     setConnectedApps(prev => prev.filter(app => app.id !== appId));
   };
 
+  const handleSaveCollectedBatch = (rows: CollectedAppTransaction[]) => {
+    setCollectedRecords((prev) => {
+      const existingIds = new Set(prev.map((r) => r.tempId));
+      const fresh = rows.filter((r) => !existingIds.has(r.tempId));
+      return [...fresh, ...prev].slice(0, 200);
+    });
+  };
+
+  const handleClearCollectedRecords = () => {
+    if (window.confirm('Clear stored collected app payment history from local storage?')) {
+      setCollectedRecords([]);
+      localStorage.removeItem('decu_collected_data');
+      localStorage.removeItem('decu_collected_drafts');
+    }
+  };
+
   const handleImportCollectedTransactions = async (
     newTxs: Omit<Transaction, 'id'>[],
     sourceAppCounts: Record<string, number>,
-    consumedWebhookIds: string[]
+    consumedWebhookIds: string[],
+    importedTempIds: string[]
   ) => {
     const txsWithIds: Transaction[] = newTxs.map((tx, idx) => ({
       ...tx,
       id: `t-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`
     }));
     setTransactions(prev => [...txsWithIds, ...prev]);
+
+    if (importedTempIds.length > 0) {
+      const idSet = new Set(importedTempIds);
+      setCollectedRecords(prev =>
+        prev.map(rec => (idSet.has(rec.tempId) ? { ...rec, importedToLedger: true } : rec))
+      );
+    }
 
     const nowIso = new Date().toISOString();
     setConnectedApps(prev =>
@@ -367,6 +439,8 @@ export default function App() {
     );
 
     if (consumedWebhookIds.length > 0) {
+      const consumedSet = new Set(consumedWebhookIds);
+      setPendingWebhooks(prev => prev.filter(w => !consumedSet.has(w.id)));
       try {
         await fetch('/api/app-payments/clear', {
           method: 'POST',
@@ -391,17 +465,20 @@ export default function App() {
   };
 
   const handleClearAllData = () => {
-    if (window.confirm('WARNING: This will permanently delete all your transaction records, active budgets, and savings goals. Continue?')) {
+    if (window.confirm('WARNING: This will permanently delete all your transaction records, active budgets, savings goals, and collected app records. Continue?')) {
       setTransactions([]);
       setBudgets([]);
       setGoals([]);
       setChatHistory([]);
+      setCollectedRecords([]);
+      setPendingWebhooks([]);
+      localStorage.removeItem('decu_collected_drafts');
     }
   };
 
   const handleExportData = () => {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(
-      JSON.stringify({ transactions, budgets, goals, chatHistory, connectedApps, globalPermissions })
+      JSON.stringify({ transactions, budgets, goals, chatHistory, connectedApps, globalPermissions, collectedRecords })
     );
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute("href", dataStr);
@@ -424,6 +501,7 @@ export default function App() {
           if (parsed.chatHistory) setChatHistory(parsed.chatHistory);
           if (parsed.connectedApps) setConnectedApps(parsed.connectedApps);
           if (parsed.globalPermissions) setGlobalPermissions(parsed.globalPermissions);
+          if (parsed.collectedRecords) setCollectedRecords(parsed.collectedRecords);
           alert('Data imported successfully!');
         } catch (err) {
           alert('Failed to parse backup file. Make sure it is a valid Decuples JSON file.');
@@ -438,8 +516,8 @@ export default function App() {
       subtitle: 'Net balance, cashflow snapshot, recent activity, and horizontal AI advisory'
     },
     transactions: {
-      title: 'Transactions & Ledger',
-      subtitle: 'Log expenses with AI or manual entry and inspect your ledger'
+      title: 'Logs & Ledger',
+      subtitle: 'Log income or expenses with AI or manual entry and inspect your ledger'
     },
     calendar: {
       title: 'Financial Calendar',
@@ -516,48 +594,19 @@ export default function App() {
               </div>
             </div>
 
-            {/* Right Controls: Currency + Clear Dark Mode Button + App Sync */}
+            {/* Right Controls: Currency + Theme + App Sync */}
             <div className="flex items-center gap-2.5 shrink-0">
-              {/* Currency selector */}
-              <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-800 px-2.5 py-1.5 rounded-lg border border-slate-200/80 dark:border-slate-700">
-                <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                  Currency
-                </span>
-                <select
-                  id="header-currency-selector"
-                  value={activeCurrency.code}
-                  onChange={(e) => {
-                    const found = CURRENCY_LIST.find((c) => c.code === e.target.value);
-                    if (found) setActiveCurrency(found);
-                  }}
-                  className="bg-transparent text-slate-800 dark:text-slate-100 text-xs font-bold focus:outline-none cursor-pointer"
-                >
-                  {CURRENCY_LIST.map((curr) => (
-                    <option
-                      key={curr.code}
-                      value={curr.code}
-                      className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
-                    >
-                      {curr.symbol} {curr.code}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Visual Currency Popover Switcher */}
+              <CurrencySwitcher
+                activeCurrency={activeCurrency}
+                onSelectCurrency={setActiveCurrency}
+              />
 
-              {/* Explicit Dark Mode Toggle Button */}
-              <button
-                id="btn-theme-toggle"
-                type="button"
-                onClick={() => setActiveTheme(activeTheme === 'light' ? 'dark' : 'light')}
-                aria-label={`Switch to ${activeTheme === 'light' ? 'dark' : 'light'} mode`}
-                title={`Switch to ${activeTheme === 'light' ? 'dark' : 'light'} mode`}
-                className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200/80 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200/80 dark:border-slate-700 text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-              >
-                <LucideIcon name={activeTheme === 'light' ? 'Moon' : 'Sun'} size={14} />
-                <span className="hidden sm:inline">
-                  {activeTheme === 'light' ? 'Dark Mode' : 'Light Mode'}
-                </span>
-              </button>
+              {/* Visual Multi-Theme Popover Switcher */}
+              <ThemeSwitcher
+                activeTheme={activeTheme}
+                onSelectTheme={setActiveTheme}
+              />
 
               {/* Primary Quick Action */}
               <button
@@ -575,9 +624,48 @@ export default function App() {
 
         {/* Main Content Frame */}
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-7 space-y-7">
-          {/* OVERVIEW VIEW (Focused, Concise Summary + Horizontal AI Insights & Advisory) */}
+          {/* OVERVIEW VIEW (Focused, Concise Summary + Daily/Weekly/Monthly/Yearly Period Filter) */}
           {activeMenu === 'overview' && (
             <>
+              {/* Timeframe Switcher Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                  <LucideIcon name="Clock" size={14} className="text-indigo-500" />
+                  <span>
+                    Showing metrics for <strong className="text-slate-800 dark:text-slate-200">{getTimeframeLabel(activePeriod)}</strong>
+                  </span>
+                </div>
+
+                <div
+                  role="group"
+                  aria-label="Timeframe period selector"
+                  className="inline-flex items-center p-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xs"
+                >
+                  {(
+                    [
+                      { id: 'daily', label: 'Daily' },
+                      { id: 'weekly', label: 'Weekly' },
+                      { id: 'monthly', label: 'Monthly' },
+                      { id: 'yearly', label: 'Yearly' }
+                    ] as const
+                  ).map((period) => (
+                    <button
+                      key={period.id}
+                      id={`btn-period-${period.id}`}
+                      type="button"
+                      onClick={() => setActivePeriod(period.id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                        activePeriod === period.id
+                          ? 'bg-indigo-600 text-white shadow-2xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                      }`}
+                    >
+                      {period.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* KPI Scorecard Stat Cards */}
               <section id="kpi-stats-grid" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-2xl flex items-center justify-between">
@@ -604,10 +692,10 @@ export default function App() {
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-2xl flex items-center justify-between">
                   <div className="space-y-1">
                     <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                      Income This Month
+                      Income ({getTimeframeLabel(activePeriod)})
                     </span>
                     <p className="text-xl font-bold font-mono tabular-nums text-emerald-600 dark:text-emerald-400 tracking-tight">
-                      +{formatAmount(stats.currentMonthIncomes, activeCurrency)}
+                      +{formatAmount(stats.periodIncomes, activeCurrency)}
                     </p>
                   </div>
                   <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 rounded-xl">
@@ -618,10 +706,10 @@ export default function App() {
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-2xl flex items-center justify-between">
                   <div className="space-y-1">
                     <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                      Outflows This Month
+                      Outflows ({getTimeframeLabel(activePeriod)})
                     </span>
                     <p className="text-xl font-bold font-mono tabular-nums text-slate-900 dark:text-white tracking-tight">
-                      -{formatAmount(stats.currentMonthExpenses, activeCurrency)}
+                      -{formatAmount(stats.periodExpenses, activeCurrency)}
                     </p>
                   </div>
                   <div className="p-3 bg-rose-50 dark:bg-rose-950/40 text-rose-500 dark:text-rose-400 rounded-xl">
@@ -652,7 +740,11 @@ export default function App() {
 
               {/* Charts Row */}
               <section id="charts-wrapper">
-                <FinanceCharts transactions={transactions} activeCurrency={activeCurrency} />
+                <FinanceCharts
+                  transactions={transactions}
+                  activeCurrency={activeCurrency}
+                  timeframe={activePeriod}
+                />
               </section>
 
               {/* Recent Activity Dedicated Row */}
@@ -677,7 +769,7 @@ export default function App() {
                       className="px-3 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5 transition"
                     >
                       <LucideIcon name="Plus" size={13} className="text-indigo-500" />
-                      <span>Log Expense</span>
+                      <span>Add Log</span>
                     </button>
                     <button
                       type="button"
@@ -971,6 +1063,9 @@ export default function App() {
         globalPermissions={globalPermissions}
         activeCurrency={activeCurrency}
         pendingWebhooks={pendingWebhooks}
+        collectedRecords={collectedRecords}
+        onClearCollectedRecords={handleClearCollectedRecords}
+        onSaveCollectedBatch={handleSaveCollectedBatch}
         onRefreshWebhooks={refreshPendingWebhooks}
         onToggleAppPermission={handleToggleAppPermission}
         onUpdateAppGranularPermission={handleUpdateAppGranularPermission}
@@ -1013,7 +1108,7 @@ export default function App() {
               </div>
             )}
           </div>
-          <span>{isChatOpen ? 'Close Advisor' : 'Chat with Wealth Advisor'}</span>
+          <span>{isChatOpen ? 'Close Chat' : 'Chat'}</span>
         </button>
       </div>
     </div>

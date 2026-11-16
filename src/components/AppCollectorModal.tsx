@@ -14,7 +14,9 @@ import {
   Transaction
 } from '../types';
 import { LucideIcon } from './LucideIcon';
+import { ReceiptScanner } from './ReceiptScanner';
 import { APP_CATEGORY_META } from '../utils/connectedApps';
+import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '../utils/mockData';
 import { formatAmount } from '../utils/currency';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -26,6 +28,9 @@ interface AppCollectorModalProps {
   globalPermissions: GlobalCollectionPermissions;
   activeCurrency: Currency;
   pendingWebhooks: PendingWebhookAlert[];
+  collectedRecords: CollectedAppTransaction[];
+  onClearCollectedRecords: () => void;
+  onSaveCollectedBatch: (rows: CollectedAppTransaction[]) => void;
   onRefreshWebhooks: () => Promise<void>;
   onToggleAppPermission: (appId: string) => void;
   onUpdateAppGranularPermission: (
@@ -39,21 +44,12 @@ interface AppCollectorModalProps {
   onImportCollectedTransactions: (
     txs: Omit<Transaction, 'id'>[],
     sourceAppCounts: Record<string, number>,
-    consumedWebhookIds: string[]
+    consumedWebhookIds: string[],
+    importedTempIds: string[]
   ) => void;
 }
 
-const LEDGER_CATEGORIES = [
-  'Food & Dining',
-  'Shopping',
-  'Transportation',
-  'Entertainment',
-  'Housing',
-  'Healthcare',
-  'Education',
-  'Others',
-  'Income'
-];
+const LEDGER_CATEGORIES = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
 
 const PAYMENT_METHODS = ['UPI', 'Credit Card', 'Debit Card', 'Bank Transfer', 'Cash'];
 
@@ -65,6 +61,9 @@ export const AppCollectorModal: React.FC<AppCollectorModalProps> = ({
   globalPermissions,
   activeCurrency,
   pendingWebhooks,
+  collectedRecords,
+  onClearCollectedRecords,
+  onSaveCollectedBatch,
   onRefreshWebhooks,
   onToggleAppPermission,
   onUpdateAppGranularPermission,
@@ -83,14 +82,38 @@ export const AppCollectorModal: React.FC<AppCollectorModalProps> = ({
     }
   }, [isOpen, initialTab]);
 
-  // --- Collect Tab State ---
+  // --- Collect Tab State (persisted drafts in localStorage) ---
   const [rawAlertText, setRawAlertText] = useState('');
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [extractedRows, setExtractedRows] = useState<CollectedAppTransaction[]>([]);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [extractedRows, setExtractedRows] = useState<CollectedAppTransaction[]>(() => {
+    try {
+      const saved = localStorage.getItem('decu_collected_drafts');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('decu_collected_drafts');
+      const parsed: CollectedAppTransaction[] = saved ? JSON.parse(saved) : [];
+      return new Set(parsed.filter((p) => p.permissionStatus === 'granted').map((p) => p.tempId));
+    } catch {
+      return new Set();
+    }
+  });
   const [consumedWebhookIds, setConsumedWebhookIds] = useState<string[]>([]);
   const [importFeedback, setImportFeedback] = useState<string | null>(null);
+  const [showReceiptScanner, setShowReceiptScanner] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('decu_collected_drafts', JSON.stringify(extractedRows));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [extractedRows]);
 
   // --- Permissions Tab State ---
   const [permCategoryFilter, setPermCategoryFilter] = useState<'all' | AppCategory>('all');
@@ -191,17 +214,47 @@ export const AppCollectorModal: React.FC<AppCollectorModalProps> = ({
         return;
       }
 
-      setExtractedRows(parsed);
+      const enrichedBatch = parsed.map((p) => ({
+        ...p,
+        collectedAt: new Date().toISOString(),
+        importedToLedger: false
+      }));
+
+      setExtractedRows(enrichedBatch);
+      onSaveCollectedBatch(enrichedBatch);
       setConsumedWebhookIds(webhookIdsToConsume);
       // Automatically select all rows whose app permission is granted
       setSelectedIds(
-        new Set(parsed.filter((p) => p.permissionStatus === 'granted').map((p) => p.tempId))
+        new Set(enrichedBatch.filter((p) => p.permissionStatus === 'granted').map((p) => p.tempId))
       );
     } catch (err: any) {
       setScanError(err.message || 'Unable to parse payment alerts.');
     } finally {
       setIsScanning(false);
     }
+  };
+
+  const handleReceiptImageExtracted = ({
+    receiptSummary,
+    transactions
+  }: {
+    receiptSummary: string;
+    transactions: CollectedAppTransaction[];
+  }) => {
+    const enrichedBatch = transactions.map((p) => ({
+      ...p,
+      collectedAt: new Date().toISOString(),
+      importedToLedger: false
+    }));
+
+    setExtractedRows(enrichedBatch);
+    onSaveCollectedBatch(enrichedBatch);
+    setConsumedWebhookIds([]);
+    setSelectedIds(
+      new Set(enrichedBatch.filter((p) => p.permissionStatus === 'granted').map((p) => p.tempId))
+    );
+    setImportFeedback(receiptSummary);
+    setShowReceiptScanner(false);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -298,13 +351,15 @@ export const AppCollectorModal: React.FC<AppCollectorModalProps> = ({
     if (permittedExtractedRows.length === 0) return;
 
     const sourceAppCounts: Record<string, number> = {};
+    const importedTempIds: string[] = [];
     const txsToSave: Omit<Transaction, 'id'>[] = permittedExtractedRows.map((row) => {
+      importedTempIds.push(row.tempId);
       if (row.sourceAppId) {
         sourceAppCounts[row.sourceAppId] = (sourceAppCounts[row.sourceAppId] || 0) + 1;
       }
       return {
         amount: row.amount / activeCurrency.rate,
-        category: row.type === 'income' ? 'Income' : row.category,
+        category: row.category || (row.type === 'income' ? INCOME_CATEGORIES[0] : 'Others'),
         date: row.date,
         description: row.description,
         type: row.type,
@@ -314,9 +369,9 @@ export const AppCollectorModal: React.FC<AppCollectorModalProps> = ({
       };
     });
 
-    onImportCollectedTransactions(txsToSave, sourceAppCounts, consumedWebhookIds);
+    onImportCollectedTransactions(txsToSave, sourceAppCounts, consumedWebhookIds, importedTempIds);
     setImportFeedback(
-      `Collected ${txsToSave.length} transaction${txsToSave.length === 1 ? '' : 's'} into your ledger.`
+      `Collected ${txsToSave.length} transaction${txsToSave.length === 1 ? '' : 's'} into your ledger & saved in local storage.`
     );
     setExtractedRows([]);
     setRawAlertText('');
@@ -536,10 +591,24 @@ export const AppCollectorModal: React.FC<AppCollectorModalProps> = ({
                     >
                       Paste UPI Alerts, Food Orders, or Shopping Receipts (one or multiple lines)
                     </label>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        id="btn-toggle-modal-receipt-scanner"
+                        type="button"
+                        onClick={() => setShowReceiptScanner((prev) => !prev)}
+                        className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                          showReceiptScanner
+                            ? 'bg-indigo-600 text-white'
+                            : 'bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 border border-indigo-200/70 dark:border-indigo-800/50'
+                        }`}
+                      >
+                        <LucideIcon name="Camera" size={12} />
+                        <span>Scan Receipt / Camera</span>
+                      </button>
+
                       <label className="px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg cursor-pointer transition flex items-center gap-1.5 whitespace-nowrap">
                         <LucideIcon name="Upload" size={12} />
-                        <span>Upload Receipt File</span>
+                        <span>Upload Text File</span>
                         <input
                           type="file"
                           accept=".txt,.csv,.json,.eml,.log"
@@ -560,6 +629,46 @@ export const AppCollectorModal: React.FC<AppCollectorModalProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  {/* Collapsible Receipt Image & Camera Scanner */}
+                  <AnimatePresence>
+                    {showReceiptScanner && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-indigo-200/70 dark:border-indigo-900/40 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+                              <LucideIcon name="ScanLine" size={14} className="text-indigo-500" />
+                              Receipt Image & Camera Scanner
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setShowReceiptScanner(false)}
+                              className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                              aria-label="Close receipt scanner"
+                            >
+                              <LucideIcon name="X" size={14} />
+                            </button>
+                          </div>
+                          <ReceiptScanner
+                            connectedApps={connectedApps}
+                            requireExplicitAppPermission={globalPermissions.requireExplicitAppPermission}
+                            disabledReason={
+                              !globalPermissions.receiptParsingEnabled
+                                ? 'Order & Receipt Parsing permission is disabled. Enable it in the App Permissions tab.'
+                                : null
+                            }
+                            onExtracted={handleReceiptImageExtracted}
+                            compact
+                          />
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
 
                   <textarea
                     id="app-alerts-textarea"
@@ -723,6 +832,59 @@ export const AppCollectorModal: React.FC<AppCollectorModalProps> = ({
                           {permittedExtractedRows.length === 1 ? '' : 's'}
                         </span>
                       </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Locally Persisted Collected App Archive */}
+                {collectedRecords.length > 0 && (
+                  <div className="space-y-2.5 pt-3 border-t border-slate-100 dark:border-slate-800">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <LucideIcon name="Database" size={14} className="text-indigo-500" />
+                        <h3 className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                          Stored Collected App Data ({collectedRecords.length})
+                        </h3>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={onClearCollectedRecords}
+                        className="text-[11px] font-medium text-rose-600 dark:text-rose-400 hover:underline"
+                      >
+                        Clear Stored History
+                      </button>
+                    </div>
+                    <div className="max-h-40 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl divide-y divide-slate-100 dark:divide-slate-800">
+                      {collectedRecords.slice(0, 12).map((rec) => (
+                        <div
+                          key={rec.tempId}
+                          className="px-3 py-2 bg-slate-50/70 dark:bg-slate-950/50 flex items-center justify-between gap-3 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <p className="font-medium text-slate-800 dark:text-slate-200 truncate">
+                              {rec.description}
+                            </p>
+                            <p className="text-[11px] text-slate-400 truncate">
+                              {rec.sourceApp} · {rec.category} · {rec.date}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2.5 shrink-0">
+                            <span className="font-mono tabular-nums font-semibold text-slate-800 dark:text-slate-100">
+                              {rec.type === 'income' ? '+' : '-'}
+                              {formatAmount(rec.amount / activeCurrency.rate, activeCurrency)}
+                            </span>
+                            <span
+                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                                rec.importedToLedger
+                                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400'
+                                  : 'bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                              }`}
+                            >
+                              {rec.importedToLedger ? 'Saved' : 'Scanned'}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}

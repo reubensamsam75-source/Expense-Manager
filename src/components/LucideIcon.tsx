@@ -59,7 +59,13 @@ import {
   Database,
   PanelLeftClose,
   PanelLeftOpen,
-  ArrowRight
+  ArrowRight,
+  Palette,
+  Clock,
+  Camera,
+  Image,
+  ScanLine,
+  Aperture
 } from 'lucide-react';
 
 interface LucideIconProps {
@@ -124,7 +130,13 @@ export const LucideIcon: React.FC<LucideIconProps> = ({ name, className = '', si
     Database,
     PanelLeftClose,
     PanelLeftOpen,
-    ArrowRight
+    ArrowRight,
+    Palette,
+    Clock,
+    Camera,
+    Image,
+    ScanLine,
+    Aperture
   };
 
   const IconComponent = map[name] || DollarSign;
